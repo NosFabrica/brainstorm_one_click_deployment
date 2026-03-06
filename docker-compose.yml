@@ -1,0 +1,140 @@
+version: "3.9"
+
+services:
+
+  brainstorm-server:
+    image: brainstorm-server-service
+    container_name: brainstorm-server
+    ports:
+      - "8000:8000"
+    environment:
+      deploy_environment: DEV
+      auth_algorithm: HS256
+      auth_secret_key: supersecretkey
+      auth_access_token_expire_minutes: 60
+      sql_admin_username: postgres
+      sql_admin_password: postgrespw
+      sql_admin_secret_key: anothersecret
+      db_url: postgresql+asyncpg://postgres:postgrespw@postgres:5432/brainstorm-database
+      redis_host: redis_strfry
+      redis_port: 6379
+      neo4j_db_url: bolt://neo4j:7687
+      neo4j_db_username: neo4j
+      neo4j_db_password: password
+      nostr_transfer_from_relay: wss://wot.grapevine.network
+      nostr_transfer_to_relay: ws://neofry:7777
+      nostr_upload_ta_events_relay: ws://strfry:7777
+      cutoff_of_valid_graperank_scores: 0.02
+    depends_on:
+      - postgres
+      - redis_strfry
+      - neo4j
+      - neofry
+      - strfry
+    restart: unless-stopped
+
+  brainstorm-graperank:
+    image: brainstorm-graperank-service
+    container_name: brainstorm-graperank
+    environment:
+      REDIS_HOST: redis_strfry
+      REDIS_PORT: 6379
+      NEO4J_URL: neo4j://neo4j:7687
+      NEO4J_USERNAME: neo4j
+      NEO4J_PASSWORD: password
+    depends_on:
+      - redis_strfry
+      - neo4j
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:15
+    container_name: postgres
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgrespw
+      POSTGRES_DB: brainstorm-database
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis_strfry:
+    image: redis:7
+    container_name: redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+  neo4j:
+    image: neo4j:5
+    container_name: neo4j
+    restart: unless-stopped
+    ports:
+      - "7474:7474"
+      - "7688:7687"
+    environment:
+      NEO4J_AUTH: neo4j/password
+      NEO4J_server_memory_heap_initial__size: 4G
+      NEO4J_server_memory_heap_max__size: 4G
+      NEO4J_server_memory_pagecache_size: 8G
+      NEO4J_server_bolt_telemetry_enabled: "false"
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+      - neo4j_import:/import
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
+
+  neofry:
+    image: kowalskift/neofry:latest
+    container_name: neofry
+    ports:
+      - "7777:7777"
+    environment:
+      ROUTER: /etc/strfry-router.conf
+    volumes:
+      - neofry-db:/app/strfry-db
+      - ./neofry.conf:/etc/strfry.conf
+    depends_on:
+      - redis_strfry
+    restart: always
+    stop_grace_period: 2m
+    ulimits:
+      nofile:
+        soft: 1000000
+        hard: 1000000
+
+  strfry:
+    image: dockurr/strfry
+    container_name: strfry
+    ports:
+      - "7778:7777"
+    volumes:
+      - strfry-db:/app/strfry-db
+      - ./strfry.conf:/etc/strfry.conf
+    restart: unless-stopped
+    ulimits:
+      nofile:
+        soft: 1000000
+        hard: 1000000
+
+
+volumes:
+  postgres_data:
+  redis_data:
+  neo4j_data:
+  neo4j_logs:
+  neo4j_import:
+  neofry-db:
+  strfry-db:
