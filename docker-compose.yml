@@ -25,6 +25,7 @@ services:
       nostr_transfer_to_relay: ws://neofry:7777
       nostr_upload_ta_events_relay: ws://strfry:7777
       cutoff_of_valid_graperank_scores: 0.02
+      perform_nostr_full_sync: true
     depends_on:
       - postgres
       - redis_strfry
