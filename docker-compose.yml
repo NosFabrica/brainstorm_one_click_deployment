@@ -27,6 +27,7 @@ services:
       nostr_upload_ta_events_relay_public_url: wss://nip85.nosfabrica.com
       cutoff_of_valid_graperank_scores: 0.02
       perform_nostr_full_sync: true
+      frontend_url: https://brainstorm.nosfabrica.com
     depends_on:
       - postgres
       - redis_strfry
