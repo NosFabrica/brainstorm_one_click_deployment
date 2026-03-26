@@ -2,6 +2,7 @@ version: "3.9"
 
 services:
 
+
   brainstorm-server:
     image: brainstorm-server-service
     container_name: brainstorm-server
@@ -35,7 +36,14 @@ services:
       - neofry
       - strfry
     restart: unless-stopped
-
+  brainstorm-ui:
+    image: brainstorm-ui-service
+    container_name: brainstorm-ui
+    ports:
+      - "3000:3000"
+    depends_on:
+      - brainstorm-server
+    restart: unless-stopped
   brainstorm-graperank:
     image: brainstorm-graperank-service
     container_name: brainstorm-graperank
