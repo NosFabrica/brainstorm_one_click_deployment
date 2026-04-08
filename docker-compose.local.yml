@@ -1,0 +1,25 @@
+services:
+  brainstorm-server:
+    environment:
+      frontend_url: http://localhost:3000
+      nostr_upload_ta_events_relay_public_url: ws://localhost:7778
+      perform_nostr_full_sync: false
+
+  brainstorm-ui:
+    build:
+      context: ../Brainstorm-UI
+      args:
+        VITE_API_URL: http://localhost:8000
+
+  # Uncomment to reduce Neo4j memory usage for machines with limited RAM
+  # neo4j:
+  #   environment:
+  #     NEO4J_server_memory_heap_initial__size: 2G
+  #     NEO4J_server_memory_heap_max__size: 2G
+  #     NEO4J_server_memory_pagecache_size: 4G
+
+  neofry:
+    image: neofry
+    build:
+      context: ../strfry
+      dockerfile: Dockerfile.neofry
