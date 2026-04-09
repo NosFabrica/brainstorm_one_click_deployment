@@ -38,7 +38,7 @@ for local dev, use the local override which builds UI and neofry from source and
 docker compose -f docker-compose.yml -f docker-compose.local.yml up --build
 ```
 
-this requires the brainstorm_server, brainstorm_graperank, Brainstorm-UI, and strfry repos cloned as siblings.
+this requires the brainstorm_server, brainstorm_graperank, and Brainstorm-UI repos cloned as siblings.
 
 ---
 
