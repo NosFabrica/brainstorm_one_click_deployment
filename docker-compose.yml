@@ -29,6 +29,8 @@ services:
       cutoff_of_valid_graperank_scores: 0.02
       perform_nostr_full_sync: true
       frontend_url: https://brainstorm.nosfabrica.com
+      admin_enabled: false
+      admin_whitelisted_pubkeys: ""
     depends_on:
       - postgres
       - redis_strfry
@@ -107,8 +109,9 @@ services:
         soft: 1048576
         hard: 1048576
 
+  # NOTE: restart neofry if router stops updating, see README.md
   neofry:
-    image: kowalskift/neofry:latest
+    image: ghcr.io/nosfabrica/neofry:latest
     container_name: neofry
     ports:
       - "7777:7777"
@@ -127,7 +130,7 @@ services:
         hard: 1000000
 
   strfry:
-    image: dockurr/strfry
+    image: ghcr.io/hoytech/strfry:latest
     container_name: strfry
     ports:
       - "7778:7777"
