@@ -1,34 +1,68 @@
-to deploy, you need to first create 2 docker images.
+# Brainstorm One-Click Deployment
 
-clone the brainstorm_server repo, and on the main directory, run:
+Deploy Brainstorm with an interactive configuration wizard that automatically builds all services from source.
 
-```bash
-docker build -t brainstorm-server-service .
-```
+## Quick Start
 
-clone the brainstorm_graperank repo, and on the main directory, run:
+### Clone this repository
 
 ```bash
-docker build -t brainstorm-graperank-service .
+git clone https://github.com/nosfabrica/brainstorm_one_click_deployment.git
+cd brainstorm_one_click_deployment
 ```
 
-clone the BrainstormUI repo, and on the main directory, run:
+### 1. Install Docker (if not already installed)
+
+For Debian or Ubuntu systems:
 
 ```bash
-docker build -t brainstorm-ui-service --build-arg VITE_API_URL=https://brainstormserver.nosfabrica.com .
+./install_docker.sh
 ```
 
-now, on this repo's main directory, run:
+### 2. Run the Configuration Wizard
 
 ```bash
-docker compose up
+./configure.sh
 ```
 
-if you want it to keep running, run:
+The wizard will interactively prompt you for:
+- **DNS domains** for UI and API
+- **System resources** (auto-detected RAM, Neo4j memory allocation)
+- **Initial sync** preferences (enable/disable full relay sync)
+- **Relay configuration** (sync source and publish targets)
+- **Secure passwords** (auto-generated for all services)
+
+### 3. Start the Services
+
+After configuration completes:
 
 ```bash
 docker compose up -d
 ```
+
+### 4. Monitor Deployment
+
+```bash
+docker compose logs -f
+```
+
+The wizard generates:
+- `docker-compose.yml` - Service orchestration with your settings
+- `Caddyfile` - Reverse proxy with automatic HTTPS
+- `.env` - Secure passwords
+
+## What Gets Deployed
+
+All services are built automatically from GitHub repositories:
+- **brainstorm-server** - FastAPI backend
+- **brainstorm-ui** - Frontend
+- **brainstorm-graperank** - GrapeRank algorithm service
+- **postgres** - Database
+- **redis** - Message queue
+- **neo4j** - Graph database
+- **neofry** - Nostr relay (Neo4J)
+- **strfry** - Nostr relay (LMDB)
+- **caddy** - Reverse proxy with automatic Let's Encrypt SSL
 
 ## Local development
 
