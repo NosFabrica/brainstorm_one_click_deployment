@@ -5,7 +5,7 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ./secrets:/run/secrets:ro
+      - ./secrets:/run/secrets:rw
     environment:
       deploy_environment: DEV
       auth_algorithm: HS256
@@ -36,18 +36,6 @@ services:
       - neofry
       - strfry
     restart: unless-stopped
-
-  nsec-rotate:
-    image: brainstorm-server-service
-    profiles: ["ops"]
-    entrypoint: ["poetry", "run", "python", "-m", "scripts.rotate_nsec_key"]
-    volumes:
-      - ./secrets:/run/secrets:rw
-      - /var/run/docker.sock:/var/run/docker.sock
-    environment:
-      DB_URL: postgresql+psycopg2://postgres:postgrespw@postgres:5432/brainstorm-database
-    depends_on:
-      - postgres
 
   brainstorm-ui:
     image: brainstorm-ui-service
