@@ -160,6 +160,8 @@ services:
     container_name: brainstorm-server
     ports:
       - "8000:8000"
+    volumes:
+      - ./secrets:/run/secrets:rw
     environment:
       deploy_environment: PRODUCTION
       auth_algorithm: HS256
