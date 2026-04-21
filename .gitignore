@@ -2,3 +2,4 @@ secrets/*
 !secrets/README.md
 .env
 Caddyfile
+docker-compose.yml
