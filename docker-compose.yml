@@ -1,6 +1,8 @@
 services:
   brainstorm-server:
-    image: brainstorm-server-service
+    build:
+      context: https://github.com/NosFabrica/brainstorm_server.git
+      dockerfile: Dockerfile
     container_name: brainstorm-server
     ports:
       - "8000:8000"
@@ -38,7 +40,11 @@ services:
     restart: unless-stopped
 
   brainstorm-ui:
-    image: brainstorm-ui-service
+    build:
+      context: https://github.com/NosFabrica/Brainstorm-UI.git
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: https://brainstormserver.nosfabrica.com
     container_name: brainstorm-ui
     ports:
       - "3000:3000"
@@ -46,7 +52,9 @@ services:
       - brainstorm-server
     restart: unless-stopped
   brainstorm-graperank:
-    image: brainstorm-graperank-service
+    build:
+      context: https://github.com/NosFabrica/brainstorm_graperank_algorithm.git
+      dockerfile: Dockerfile
     container_name: brainstorm-graperank
     environment:
       REDIS_HOST: redis_strfry
@@ -142,6 +150,22 @@ services:
         soft: 1000000
         hard: 1000000
 
+  caddy:
+    image: caddy:2
+    container_name: caddy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+    depends_on:
+      - brainstorm-server
+      - brainstorm-ui
+      - neofry
+      - strfry
+    restart: unless-stopped
+
 volumes:
   postgres_data:
   redis_data:
@@ -150,3 +174,4 @@ volumes:
   neo4j_import:
   neofry-db:
   strfry-db:
+  caddy_data:
