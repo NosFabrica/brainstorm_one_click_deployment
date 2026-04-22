@@ -15,7 +15,7 @@ docker build -t brainstorm-graperank-service .
 clone the BrainstormUI repo, and on the main directory, run:
 
 ```bash
-docker build -t brainstorm-ui-service --build-arg VITE_API_URL=https://brainstormserver.nosfabrica.com .
+docker build -t brainstorm-ui-service --build-arg VITE_API_URL=https://brainstormserver.nosfabrica.com VITE_NIP85_RELAY_URL=wss://nip85.nosfabrica.com .
 ```
 
 now, on this repo's main directory, run:
