@@ -3,3 +3,4 @@ secrets/*
 .env
 Caddyfile
 docker-compose.yml
+*.env.*

@@ -85,23 +85,17 @@ load_previous_config() {
         PREV_PUBLISH_RELAY_URL="${PUBLISH_RELAY_URL:-}"
         PREV_ADMIN_ENABLED="${ADMIN_ENABLED:-}"
         PREV_ADMIN_WHITELISTED_PUBKEYS="${ADMIN_WHITELISTED_PUBKEYS:-}"
+        PREV_JAVA_XMS="${JAVA_XMS:-}"
+        PREV_JAVA_XMX="${JAVA_XMX:-}"
+        PREV_CONTAINER_MEMORY="${CONTAINER_MEMORY:-}"
+        PREV_CONTAINER_MEMORY_RESERVATION="${CONTAINER_MEMORY_RESERVATION:-}"
+        PREV_WORKER_CONCURRENCY="${WORKER_CONCURRENCY:-}"
         
         # Keep passwords if they exist
         PREV_PG_PASSWORD="${PG_PASSWORD:-}"
         PREV_NEO4J_PASSWORD="${NEO4J_PASSWORD:-}"
         PREV_AUTH_SECRET="${AUTH_SECRET:-}"
         PREV_SQL_ADMIN_SECRET="${SQL_ADMIN_SECRET:-}"
-        
-        # Extract memory settings from existing docker-compose.yml if it exists
-        if [ -f "${SCRIPT_DIR}/docker-compose.yml" ]; then
-            # Extract -Xmx value from JAVA_OPTS
-            PREV_JAVA_XMX=$(grep -A 10 "JAVA_OPTS:" "${SCRIPT_DIR}/docker-compose.yml" | grep -m1 "Xmx" | sed 's/.*-Xmx\([^ ]*\).*/\1/')
-            PREV_JAVA_XMS=$(grep -A 10 "JAVA_OPTS:" "${SCRIPT_DIR}/docker-compose.yml" | grep -m1 "Xms" | sed 's/.*-Xms\([^ ]*\).*/\1/')
-            
-            # Extract container memory limit
-            PREV_CONTAINER_MEMORY=$(grep -A 5 "brainstorm-graperank" "${SCRIPT_DIR}/docker-compose.yml" | grep -A 20 "deploy:" | grep -m1 "memory:" | awk '{print $2}')
-            PREV_CONTAINER_MEMORY_RESERVATION=$(grep -A 5 "brainstorm-graperank" "${SCRIPT_DIR}/docker-compose.yml" | grep -A 20 "reservations:" | grep -m1 "memory:" | awk '{print $2}')
-        fi
         
         return 0
     else
@@ -137,6 +131,33 @@ calc_neo4j_memory() {
     NEO4J_PAGECACHE="${pagecache}G"
 }
 
+# ── Build Java command argv list ────────────────────────────────────────────
+# Build a YAML flow-sequence argv list from JAVA_OPTS + "-jar app.jar".
+# Splits JAVA_OPTS on whitespace so each flag becomes its own argv entry.
+# Result looks like: ["-Xms2g", "-Xmx12g", "-XX:+UseG1GC", "-jar", "app.jar"]
+# This becomes the `command:` for the compose service, paired with
+# `entrypoint: ["java"]` -- no shell, no env-var expansion, no surprises.
+build_java_command() {
+    local opts="$1"
+    # shellcheck disable=SC2206
+    local -a parts=( $opts )
+    parts+=( "-jar" "app.jar" )
+    local out="[" first=1 p
+    for p in "${parts[@]}"; do
+        [[ -z "$p" ]] && continue
+        # escape any double quotes inside an arg
+        p="${p//\"/\\\"}"
+        if (( first )); then
+            out+="\"$p\""
+            first=0
+        else
+            out+=", \"$p\""
+        fi
+    done
+    out+="]"
+    printf '%s' "$out"
+}
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 banner
 
@@ -156,17 +177,11 @@ else
     PREV_PUBLISH_RELAY_URL=""
     PREV_ADMIN_ENABLED=""
     PREV_ADMIN_WHITELISTED_PUBKEYS=""
-    PREV_JAVA_XMX=""
     PREV_JAVA_XMS=""
+    PREV_JAVA_XMX=""
     PREV_CONTAINER_MEMORY=""
     PREV_CONTAINER_MEMORY_RESERVATION=""
 fi
-
-# Set memory defaults (use previous values or fallback to defaults)
-JAVA_XMX="${PREV_JAVA_XMX:-3584m}"
-JAVA_XMS="${PREV_JAVA_XMS:-2g}"
-CONTAINER_MEMORY="${PREV_CONTAINER_MEMORY:-4g}"
-CONTAINER_MEMORY_RESERVATION="${PREV_CONTAINER_MEMORY_RESERVATION:-2g}"
 
 # ── DNS Names ────────────────────────────────────────────────────────────────
 section "1/6  DNS Configuration"
@@ -219,6 +234,24 @@ if ! [[ "$GRAPERANK_WORKERS" =~ ^[1-9][0-9]*$ ]]; then
 fi
 
 echo -e "  ${BOLD}Workers:${RESET} ${GRAPERANK_WORKERS}"
+
+echo ""
+echo -e "  ${DIM}Java worker memory settings (for graperank algorithm):${RESET}"
+echo -e "  ${DIM}Xms: Initial heap size, Xmx: Maximum heap size${RESET}"
+echo -e "  ${DIM}Recommended: Xms=2g, Xmx=8g for 16GB RAM, scale based on available memory${RESET}"
+echo ""
+prompt JAVA_XMS "Java initial heap (Xms)" "${PREV_JAVA_XMS:-2g}"
+prompt JAVA_XMX "Java max heap (Xmx)" "${PREV_JAVA_XMX:-8g}"
+prompt CONTAINER_MEMORY "Container memory limit" "${PREV_CONTAINER_MEMORY:-10g}"
+prompt CONTAINER_MEMORY_RESERVATION "Container memory reservation" "${PREV_CONTAINER_MEMORY_RESERVATION:-2g}"
+
+# Build JAVA_OPTS from the simple values
+JAVA_OPTS="-Xms${JAVA_XMS} -Xmx${JAVA_XMX} -XX:+UseG1GC"
+
+echo -e "  ${BOLD}Java Xms:${RESET} ${JAVA_XMS}"
+echo -e "  ${BOLD}Java Xmx:${RESET} ${JAVA_XMX}"
+echo -e "  ${BOLD}Container limit:${RESET} ${CONTAINER_MEMORY}"
+echo -e "  ${BOLD}Container reservation:${RESET} ${CONTAINER_MEMORY_RESERVATION}"
 
 # ── Full Sync ────────────────────────────────────────────────────────────────
 section "4/6  Initial Relay Sync"
@@ -338,12 +371,6 @@ services:
       frontend_url: https://${UI_DOMAIN}
       admin_enabled: ${ADMIN_ENABLED}
       admin_whitelisted_pubkeys: "${ADMIN_WHITELISTED_PUBKEYS}"
-      PYTHONUNBUFFERED: "1"
-      PYTHONDONTWRITEBYTECODE: "1"
-      UVICORN_WORKERS: "4"
-      UVICORN_BACKLOG: "2048"
-      UVICORN_LIMIT_CONCURRENCY: "1000"
-      UVICORN_TIMEOUT_KEEP_ALIVE: "5"
     depends_on:
       - postgres
       - redis_strfry
@@ -380,6 +407,9 @@ services:
 EOF
 
 # Generate graperank workers based on GRAPERANK_WORKERS count
+# Build the Java command argv list (baked in, no env var expansion)
+JAVA_COMMAND=$(build_java_command "$JAVA_OPTS")
+
 for i in $(seq 1 $GRAPERANK_WORKERS); do
   cat >> "${SCRIPT_DIR}/docker-compose.yml" <<EOF
   brainstorm-graperank-worker-${i}:
@@ -393,15 +423,10 @@ for i in $(seq 1 $GRAPERANK_WORKERS); do
       NEO4J_URL: neo4j://neo4j:7687
       NEO4J_USERNAME: neo4j
       NEO4J_PASSWORD: ${NEO4J_PASSWORD}
-      JAVA_OPTS: >-
-        -Xms${JAVA_XMS}
-        -Xmx${JAVA_XMX}
-        -XX:+UseG1GC
-        -XX:MaxGCPauseMillis=200
-        -XX:+UseStringDeduplication
-        -XX:+ParallelRefProcEnabled
-        -XX:MaxMetaspaceSize=256m
-        -Djava.net.preferIPv4Stack=true
+    # Override entrypoint to avoid shell expansion of JAVA_OPTS
+    # Java args are baked into command as explicit argv list
+    entrypoint: ["java"]
+    command: ${JAVA_COMMAND}
     depends_on:
       - redis_strfry
       - neo4j
@@ -597,6 +622,11 @@ API_DOMAIN=${API_DOMAIN}
 
 # Worker Configuration
 GRAPERANK_WORKERS=${GRAPERANK_WORKERS}
+JAVA_XMS=${JAVA_XMS}
+JAVA_XMX=${JAVA_XMX}
+CONTAINER_MEMORY=${CONTAINER_MEMORY}
+CONTAINER_MEMORY_RESERVATION=${CONTAINER_MEMORY_RESERVATION}
+WORKER_CONCURRENCY=${WORKER_CONCURRENCY}
 
 # Sync Configuration
 FULL_SYNC=${FULL_SYNC}
