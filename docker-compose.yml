@@ -27,7 +27,7 @@ services:
       cutoff_of_valid_graperank_scores: 0.02
       perform_nostr_full_sync: true
       frontend_url: https://brainstorm.nosfabrica.com
-      public_base_url: https://brainstorm-server.nosfabrica.com
+      public_base_url: https://brainstormserver.nosfabrica.com
       admin_enabled: false
       admin_whitelisted_pubkeys: ""
     depends_on:
