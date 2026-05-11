@@ -30,12 +30,15 @@ services:
       public_base_url: https://brainstormserver.nosfabrica.com
       admin_enabled: false
       admin_whitelisted_pubkeys: ""
+      meilisearch_url: http://meilisearch:7700
+      meilisearch_master_key: masterKey
     depends_on:
       - postgres
       - redis_strfry
       - neo4j
       - neofry
       - strfry
+      - meilisearch
     restart: unless-stopped
 
   brainstorm-ui:
@@ -143,6 +146,18 @@ services:
         soft: 1000000
         hard: 1000000
 
+  meilisearch:
+    image: getmeili/meilisearch:v1.10
+    container_name: meilisearch
+    ports:
+      - "7700:7700"
+    environment:
+      MEILI_MASTER_KEY: masterKey
+      MEILI_ENV: development
+    volumes:
+      - meilisearch_data:/meili_data
+    restart: unless-stopped
+
 volumes:
   postgres_data:
   redis_data:
@@ -151,3 +166,4 @@ volumes:
   neo4j_import:
   neofry-db:
   strfry-db:
+  meilisearch_data:
