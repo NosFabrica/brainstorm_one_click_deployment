@@ -120,14 +120,28 @@ services:
     volumes:
       - neofry-db:/app/strfry-db
       - ./neofry.conf:/etc/strfry.conf
+      - ./strfry-router.conf:/etc/strfry-router.conf
     depends_on:
       - redis_strfry
     restart: always
     stop_grace_period: 2m
+    labels:
+      autoheal: "true"
     ulimits:
       nofile:
         soft: 1000000
         hard: 1000000
+
+  autoheal:
+    image: willfarrell/autoheal:latest
+    container_name: autoheal
+    restart: always
+    environment:
+      AUTOHEAL_CONTAINER_LABEL: autoheal
+      AUTOHEAL_INTERVAL: 30
+      AUTOHEAL_DEFAULT_STOP_TIMEOUT: 30
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
 
   strfry:
     image: ghcr.io/hoytech/strfry:latest

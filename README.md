@@ -42,6 +42,18 @@ this requires the brainstorm_server, brainstorm_graperank, and Brainstorm-UI rep
 
 ---
 
+## Router configuration
+
+The neofry router config lives at `strfry-router.conf` in this repo and is bind-mounted into the container at `/etc/strfry-router.conf`. Edit it on the host — strfry's `file_change_monitor` picks up changes in-process, no restart or rebuild needed.
+
+The file overlays the default baked into the neofry image. Removing the bind mount falls back to the image default.
+
+### Autoheal
+
+If the router loses its upstream connection, the autoheal sidecar restarts neofry automatically within ~3-4 minutes (healthcheck: 60s interval, 3 retries, then 30s autoheal poll). The healthcheck verifies both the local relay (HTTP probe on `:7777`) and the `strfry router` subprocess.
+
+---
+
 ## Troubleshooting
 
 ### Relay is no longer syncing
@@ -59,9 +71,17 @@ Check the neofry logs for these three signs:
 ```bash
 # Check neofry logs
 docker logs neofry --tail 100
+
+# Check current healthcheck status
+docker inspect --format='{{.State.Health.Status}}' neofry
+
+# Check autoheal activity
+docker logs autoheal --tail 50
 ```
 
-#### Restarting neofry
+#### Manual restart (fallback)
+
+If autoheal doesn't recover the container or you want to force a restart sooner:
 
 ```bash
 # Connect to the remote production server (replace with values given by admin)
