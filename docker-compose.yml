@@ -30,12 +30,20 @@ services:
       public_base_url: https://brainstormserver.nosfabrica.com
       admin_enabled: false
       admin_whitelisted_pubkeys: ""
+      vespa_url: http://vespa:8080
     depends_on:
-      - postgres
-      - redis_strfry
-      - neo4j
-      - neofry
-      - strfry
+      postgres:
+        condition: service_healthy
+      redis_strfry:
+        condition: service_started
+      neo4j:
+        condition: service_started
+      neofry:
+        condition: service_started
+      strfry:
+        condition: service_started
+      vespa-deploy:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   brainstorm-ui:
@@ -143,6 +151,60 @@ services:
         soft: 1000000
         hard: 1000000
 
+  # Vespa: search engine for nostr profile queries. The application package lives
+  # in ./vespa-app (schema + services.xml). The deploy sidecar tars that package
+  # and POSTs it to the config server on first startup. Data lives in vespa_var.
+  vespa:
+    image: vespaengine/vespa
+    container_name: vespa
+    hostname: vespa
+    ports:
+      - "8080:8080"     # query / document API
+      - "19071:19071"   # config server
+    volumes:
+      - vespa_var:/opt/vespa/var
+    healthcheck:
+      test: ["CMD", "curl", "-fSs", "http://localhost:19071/state/v1/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 60
+      start_period: 60s
+    restart: unless-stopped
+
+  # Deploys the app package to Vespa AND blocks until the search container is
+  # actually serving it. Exit code 0 from this sidecar is the "Vespa is fully
+  # ready" signal that brainstorm-server depends on.
+  vespa-deploy:
+    image: vespaengine/vespa
+    container_name: vespa-deploy
+    depends_on:
+      vespa:
+        condition: service_healthy
+    volumes:
+      - ./vespa-app:/app:ro
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        set -euo pipefail
+        echo "[vespa-deploy] packaging app..."
+        tar -czf /tmp/app.tgz -C /app .
+        echo "[vespa-deploy] prepareandactivate..."
+        curl -fSs --data-binary @/tmp/app.tgz \
+          -H 'Content-Type: application/x-gzip' \
+          http://vespa:19071/application/v2/tenant/default/prepareandactivate
+        echo "[vespa-deploy] waiting for container cluster to serve the app..."
+        for i in $$(seq 1 120); do
+          if curl -fSs -o /dev/null http://vespa:8080/ApplicationStatus; then
+            echo "[vespa-deploy] vespa is serving — ready."
+            exit 0
+          fi
+          sleep 2
+        done
+        echo "[vespa-deploy] timed out waiting for /ApplicationStatus" >&2
+        exit 1
+    restart: "no"
+
 volumes:
   postgres_data:
   redis_data:
@@ -151,3 +213,4 @@ volumes:
   neo4j_import:
   neofry-db:
   strfry-db:
+  vespa_var:
