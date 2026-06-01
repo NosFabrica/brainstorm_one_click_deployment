@@ -18,7 +18,7 @@ schema doc {
         }
 
         field pubkey type string {
-            indexing: attribute | summary
+            indexing: attribute | summary | index
             attribute: fast-search
         }
 

@@ -187,6 +187,13 @@ services:
       - -c
       - |
         set -euo pipefail
+        # Fast-path: if Vespa already has the app activated and is serving, skip
+        # the (idempotent but slow) re-deploy. Compose re-runs this sidecar on
+        # every `up` that touches a dependent service; this keeps that cheap.
+        if curl -fSs -o /dev/null http://vespa:8080/ApplicationStatus; then
+          echo "[vespa-deploy] vespa is already serving — skip redeploy."
+          exit 0
+        fi
         echo "[vespa-deploy] packaging app..."
         tar -czf /tmp/app.tgz -C /app .
         echo "[vespa-deploy] prepareandactivate..."
