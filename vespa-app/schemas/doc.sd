@@ -124,10 +124,13 @@ schema doc {
         }
 
         # Text relevance for the name field — the primary signal.
+        # Guard the bm25/fieldLength division against fieldLength=0 (empty field)
+        # which would produce 0/0 = NaN and propagate through max() in primary_text,
+        # silently dropping docs whose other text field is empty.
         function name_text() {
             expression {
                 matchCount(name) * 100
-                + bm25(name) / pow(fieldLength(name), 1.5)
+                + if(fieldLength(name) > 0, bm25(name) / pow(fieldLength(name), 1.5), 0)
                 + query(w_gram) * bm25(name_gram)
             }
         }
@@ -136,7 +139,7 @@ schema doc {
         function display_name_text() {
             expression {
                 matchCount(display_name) * 100
-                + bm25(display_name) / pow(fieldLength(display_name), 1.5)
+                + if(fieldLength(display_name) > 0, bm25(display_name) / pow(fieldLength(display_name), 1.5), 0)
                 + query(w_gram) * bm25(display_name_gram)
             }
         }
