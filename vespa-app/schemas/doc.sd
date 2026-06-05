@@ -1,0 +1,231 @@
+schema doc {
+
+    document doc {
+
+        field name type string {
+            indexing: index | summary
+            index: enable-bm25
+        }
+
+        field display_name type string {
+            indexing: index | summary
+            index: enable-bm25
+        }
+
+        field about type string {
+            indexing: index | summary
+            index: enable-bm25
+        }
+
+        field pubkey type string {
+            indexing: attribute | summary | index
+            attribute: fast-search
+        }
+
+        field picture type string {
+            indexing: summary
+        }
+
+        field banner type string {
+            indexing: summary
+        }
+
+        field nip05 type string {
+            indexing: summary
+        }
+
+        field lud06 type string {
+            indexing: summary
+        }
+
+        field lud16 type string {
+            indexing: summary
+        }
+
+        field website type string {
+            indexing: summary
+        }
+
+        field quality_scores type tensor<int8>(user{}) {
+            indexing: attribute
+        }
+    }
+
+    field name_gram type string {
+        indexing: input name | index
+        index: enable-bm25
+        match {
+            gram
+            gram-size: 3
+        }
+    }
+
+    field display_name_gram type string {
+        indexing: input display_name | index
+        index: enable-bm25
+        match {
+            gram
+            gram-size: 3
+        }
+    }
+
+    field pubkey_gram type string {
+        indexing: input pubkey | index
+        index: enable-bm25
+        match {
+            gram
+            gram-size: 3
+        }
+    }
+
+    field about_gram type string {
+        indexing: input about | index
+        index: enable-bm25
+        match {
+            gram
+            gram-size: 3
+        }
+    }
+
+    fieldset default {
+        fields: name, display_name, about
+    }
+
+    fieldset grams {
+        fields: name_gram, display_name_gram, pubkey_gram
+    }
+
+    rank-profile name_only {
+        first-phase {
+            expression {
+                matchCount(name) * 1000
+                + bm25(name) / pow(fieldLength(name), 1.5)
+            }
+        }
+    }
+
+    rank-profile name_and_quality_score_only {
+
+        inputs {
+            query(user_q) tensor<float>(user{})
+            query(w_gram) double: 5.0
+            query(w_display_name) double: 0.2
+            query(w_about) double: 0.1
+            query(w_about_bonus) double: 0.0
+        }
+
+        function user_score() {
+            expression: sum(query(user_q) * attribute(quality_scores))
+        }
+
+        # Logistic sigmoid centered at midpoint=50, slope=0.073 → σ(20)≈0.1, σ(80)≈0.9
+        function quality_boost() {
+            expression: 1000 / (1 + exp(-0.073 * (user_score() - 50)))
+        }
+
+        # Text relevance for the name field — the primary signal.
+        # Guard the bm25/fieldLength division against fieldLength=0 (empty field)
+        # which would produce 0/0 = NaN and propagate through max() in primary_text,
+        # silently dropping docs whose other text field is empty.
+        function name_text() {
+            expression {
+                matchCount(name) * 100
+                + if(fieldLength(name) > 0, bm25(name) / pow(fieldLength(name), 1.5), 0)
+                + query(w_gram) * bm25(name_gram)
+            }
+        }
+
+        # Same strategy as name_text, applied to display_name.
+        function display_name_text() {
+            expression {
+                matchCount(display_name) * 100
+                + if(fieldLength(display_name) > 0, bm25(display_name) / pow(fieldLength(display_name), 1.5), 0)
+                + query(w_gram) * bm25(display_name_gram)
+            }
+        }
+
+        # about: IDF-aware only (bm25), no flat matchCount term. This makes rare bio
+        # terms (e.g. "nosfabrica") score high while common ones (e.g. "robert",
+        # "bitcoin") score low — so a single-word bio search finds affiliated people
+        # without common words surfacing bio-mentioners over name-bearers.
+        function about_text() {
+            expression {
+                bm25(about)
+                + query(w_gram) * bm25(about_gram)
+            }
+        }
+
+        # name and display_name have EQUAL impact: take whichever matched better.
+        # max (not sum) avoids double-counting the same term across both fields.
+        function primary_text() {
+            expression: max(name_text(), display_name_text())
+        }
+
+        # about contributes only when NEITHER name nor display_name matched (fallback),
+        # and is IDF-aware. Gating on both fields prevents a doc whose display_name
+        # matched (e.g. "Primal Studio" for "primal") from also collecting the about
+        # bonus — that double-dip let it edge past an exact name match.
+        function secondary_active() {
+            expression: if(matchCount(name) > 0 || matchCount(display_name) > 0, 0, 1)
+        }
+
+        first-phase {
+            expression {
+                primary_text()
+                + secondary_active() * query(w_about) * about_text()
+                + quality_boost()
+            }
+        }
+
+        match-features {
+            user_score
+            quality_boost
+            name_text
+            display_name_text
+            about_text
+        }
+    }
+
+    rank-profile search_rank {
+
+        inputs {
+            query(qlen) double: 5.0
+            query(w_name) double: 3.0
+            query(w_display_name) double: 3.0
+            query(w_about) double: 1.0
+            query(w_name_gram) double: 0.5
+            query(w_display_name_gram) double: 0.5
+            query(w_pubkey_gram) double: 0.1
+            query(w_quality) double: 1.0
+            query(user_q) tensor<float>(user{})
+        }
+
+        function user_score() {
+            expression: sum(query(user_q) * attribute(quality_scores))
+        }
+
+        match-features {
+            user_score
+        }
+
+        first-phase {
+            expression {
+                (
+                    min(query(qlen) / 5.0, 1.0) *
+                        (
+                            query(w_name) * bm25(name)
+                            + query(w_display_name) * bm25(display_name)
+                            + query(w_about) * bm25(about)
+                        )
+                    + max(1.5 - query(qlen) / 8.0, 0.3) *
+                        (
+                            query(w_name_gram) * bm25(name_gram)
+                            + query(w_display_name_gram) * bm25(display_name_gram)
+                        )
+                    + query(w_pubkey_gram) * bm25(pubkey_gram)
+                )
+                * if(user_score() > 0, pow(1 + user_score(), query(w_quality)), 1)
+            }
+        }
+    }
+}
