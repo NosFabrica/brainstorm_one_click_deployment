@@ -1,2 +1,6 @@
 secrets/*
 !secrets/README.md
+
+# brainstorm CLI build output
+/bin/
+

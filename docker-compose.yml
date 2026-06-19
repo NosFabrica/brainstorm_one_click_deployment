@@ -1,80 +1,84 @@
 services:
   brainstorm-server:
-    image: brainstorm-server-service
+    image: ghcr.io/nosfabrica/brainstorm_server:latest
     container_name: brainstorm-server
     ports:
       - "8000:8000"
     volumes:
       - ./secrets:/run/secrets:rw
     environment:
-      deploy_environment: DEV
+      deploy_environment: ${DEPLOY_ENVIRONMENT:-DEV}
       auth_algorithm: HS256
-      auth_secret_key: supersecretkey
+      auth_secret_key: ${AUTH_SECRET_KEY:-supersecretkey}
       auth_access_token_expire_minutes: 60
       sql_admin_username: postgres
-      sql_admin_password: postgrespw
-      sql_admin_secret_key: anothersecret
-      db_url: postgresql+asyncpg://postgres:postgrespw@postgres:5432/brainstorm-database
-      redis_host: redis_strfry
+      sql_admin_password: ${SQL_ADMIN_PASSWORD:-postgrespw}
+      sql_admin_secret_key: ${SQL_ADMIN_SECRET_KEY:-anothersecret}
+      db_url: postgresql+asyncpg://postgres:${SQL_ADMIN_PASSWORD:-postgrespw}@brainstorm-postgres:5432/brainstorm-database
+      redis_host: brainstorm-redis
       redis_port: 6379
-      neo4j_db_url: bolt://neo4j:7687
+      neo4j_db_url: bolt://brainstorm-neo4j:7687
       neo4j_db_username: neo4j
-      neo4j_db_password: password
-      nostr_transfer_from_relay: wss://wot.grapevine.network
-      nostr_transfer_to_relay: ws://neofry:7777
-      nostr_upload_ta_events_relay: ws://strfry:7777
-      nostr_upload_ta_events_relay_public_url: wss://nip85.nosfabrica.com
+      neo4j_db_password: ${NEO4J_PASSWORD:-password}
+      nostr_transfer_from_relay: ${NOSTR_TRANSFER_FROM_RELAY:-wss://wot.grapevine.network}
+      nostr_transfer_to_relay: ws://brainstorm-neofry:7777
+      nostr_upload_ta_events_relay: ws://brainstorm-strfry-nip85:7777
+      nostr_upload_ta_events_relay_public_url: ${NIP85_RELAY_PUBLIC_URL:-wss://nip85.nosfabrica.com}
       cutoff_of_valid_graperank_scores: 0.02
       perform_nostr_full_sync: true
-      frontend_url: https://brainstorm.nosfabrica.com
-      public_base_url: https://brainstormserver.nosfabrica.com
-      admin_enabled: false
-      admin_whitelisted_pubkeys: ""
-      vespa_url: http://vespa:8080
+      frontend_url: ${FRONTEND_URL:-https://brainstorm.nosfabrica.com}
+      public_base_url: ${PUBLIC_BASE_URL:-https://brainstormserver.nosfabrica.com}
+      admin_enabled: ${ADMIN_ENABLED:-false}
+      admin_whitelisted_pubkeys: "${ADMIN_WHITELISTED_PUBKEYS:-}"
+      vespa_url: http://brainstorm-vespa:8080
     depends_on:
-      postgres:
+      brainstorm-postgres:
         condition: service_healthy
-      redis_strfry:
+      brainstorm-redis:
         condition: service_started
-      neo4j:
+      brainstorm-neo4j:
         condition: service_started
-      neofry:
+      brainstorm-neofry:
         condition: service_started
-      strfry:
+      brainstorm-strfry-nip85:
         condition: service_started
-      vespa-deploy:
+      brainstorm-vespa-deploy:
         condition: service_completed_successfully
     restart: unless-stopped
 
   brainstorm-ui:
-    image: brainstorm-ui-service
+    image: ghcr.io/nosfabrica/brainstorm-ui:latest
     container_name: brainstorm-ui
     ports:
       - "3000:3000"
+    environment:
+      - VITE_API_URL=${VITE_API_URL:-http://localhost:8000}
+      - VITE_NIP85_RELAY_URL=${VITE_NIP85_RELAY_URL:-wss://localhost:7778}
     depends_on:
       - brainstorm-server
     restart: unless-stopped
+
   brainstorm-graperank:
-    image: brainstorm-graperank-service
+    image: ghcr.io/nosfabrica/brainstorm_graperank_algorithm:latest
     container_name: brainstorm-graperank
     environment:
-      REDIS_HOST: redis_strfry
+      REDIS_HOST: brainstorm-redis
       REDIS_PORT: 6379
-      NEO4J_URL: neo4j://neo4j:7687
+      NEO4J_URL: neo4j://brainstorm-neo4j:7687
       NEO4J_USERNAME: neo4j
-      NEO4J_PASSWORD: password
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-password}
     depends_on:
-      - redis_strfry
-      - neo4j
+      - brainstorm-redis
+      - brainstorm-neo4j
     restart: unless-stopped
 
-  postgres:
+  brainstorm-postgres:
     image: postgres:15
-    container_name: postgres
+    container_name: brainstorm-postgres
     restart: always
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgrespw
+      POSTGRES_PASSWORD: ${SQL_ADMIN_PASSWORD:-postgrespw}
       POSTGRES_DB: brainstorm-database
     ports:
       - "5432:5432"
@@ -85,25 +89,36 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    networks:
+      default:
+        aliases:
+          - postgres
 
-  redis_strfry:
+  brainstorm-redis:
     image: redis:7
-    container_name: redis
+    container_name: brainstorm-redis
     ports:
       - "6379:6379"
     volumes:
       - redis_data:/data
     restart: unless-stopped
+    networks:
+      default:
+        # Preserve the previous DNS names so the closed-source neofry image
+        # (which has its redis host baked in) keeps resolving them.
+        aliases:
+          - redis_strfry
+          - redis
 
-  neo4j:
+  brainstorm-neo4j:
     image: neo4j:5
-    container_name: neo4j
+    container_name: brainstorm-neo4j
     restart: unless-stopped
     ports:
       - "7474:7474"
       - "7688:7687"
     environment:
-      NEO4J_AUTH: neo4j/password
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-password}
       NEO4J_server_memory_heap_initial__size: 4G
       NEO4J_server_memory_heap_max__size: 4G
       NEO4J_server_memory_pagecache_size: 8G
@@ -116,11 +131,16 @@ services:
       nofile:
         soft: 1048576
         hard: 1048576
+    networks:
+      default:
+        # Preserve the previous DNS name for the neofry image's neo4j writes.
+        aliases:
+          - neo4j
 
   # NOTE: restart neofry if router stops updating, see README.md
-  neofry:
+  brainstorm-neofry:
     image: ghcr.io/nosfabrica/neofry:latest
-    container_name: neofry
+    container_name: brainstorm-neofry
     ports:
       - "7777:7777"
     environment:
@@ -130,7 +150,7 @@ services:
       - ./neofry.conf:/etc/strfry.conf
       - ./strfry-router.conf:/etc/strfry-router.conf
     depends_on:
-      - redis_strfry
+      - brainstorm-redis
     restart: always
     stop_grace_period: 2m
     labels:
@@ -139,10 +159,14 @@ services:
       nofile:
         soft: 1000000
         hard: 1000000
+    networks:
+      default:
+        aliases:
+          - neofry
 
-  autoheal:
+  brainstorm-autoheal:
     image: willfarrell/autoheal:latest
-    container_name: autoheal
+    container_name: brainstorm-autoheal
     restart: always
     environment:
       AUTOHEAL_CONTAINER_LABEL: autoheal
@@ -151,9 +175,9 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
 
-  strfry:
+  brainstorm-strfry-nip85:
     image: ghcr.io/hoytech/strfry:latest
-    container_name: strfry
+    container_name: brainstorm-strfry-nip85
     ports:
       - "7778:7777"
     volumes:
@@ -164,13 +188,19 @@ services:
       nofile:
         soft: 1000000
         hard: 1000000
+    networks:
+      default:
+        aliases:
+          - strfry
 
   # Vespa: search engine for nostr profile queries. The application package lives
   # in ./vespa-app (schema + services.xml). The deploy sidecar tars that package
   # and POSTs it to the config server on first startup. Data lives in vespa_var.
-  vespa:
+  brainstorm-vespa:
     image: vespaengine/vespa
-    container_name: vespa
+    container_name: brainstorm-vespa
+    # hostname stays "vespa": Vespa's app package (hosts.xml) is keyed off the
+    # node identity and this value is known-good; the alias below covers DNS.
     hostname: vespa
     ports:
       - "8080:8080"     # query / document API
@@ -184,15 +214,19 @@ services:
       retries: 60
       start_period: 60s
     restart: unless-stopped
+    networks:
+      default:
+        aliases:
+          - vespa
 
   # Deploys the app package to Vespa AND blocks until the search container is
   # actually serving it. Exit code 0 from this sidecar is the "Vespa is fully
   # ready" signal that brainstorm-server depends on.
-  vespa-deploy:
+  brainstorm-vespa-deploy:
     image: vespaengine/vespa
-    container_name: vespa-deploy
+    container_name: brainstorm-vespa-deploy
     depends_on:
-      vespa:
+      brainstorm-vespa:
         condition: service_healthy
     volumes:
       - ./vespa-app:/app:ro
@@ -204,8 +238,10 @@ services:
         # Fast-path: if Vespa already has the app activated and is serving, skip
         # the (idempotent but slow) re-deploy. Compose re-runs this sidecar on
         # every `up` that touches a dependent service; this keeps that cheap.
-        if curl -fSs -o /dev/null http://vespa:8080/ApplicationStatus; then
-          echo "[vespa-deploy] vespa is already serving — skip redeploy."
+        # Set FORCE_DEPLOY=1 to bypass and always ship the package (use when
+        # you've edited the schema or services.xml and want it live).
+        if [ "${FORCE_DEPLOY:-0}" != "1" ] && curl -fSs -o /dev/null http://brainstorm-vespa:8080/ApplicationStatus; then
+          echo "[vespa-deploy] vespa is already serving — skip redeploy (set FORCE_DEPLOY=1 to override)."
           exit 0
         fi
         echo "[vespa-deploy] packaging app..."
@@ -213,10 +249,10 @@ services:
         echo "[vespa-deploy] prepareandactivate..."
         curl -fSs --data-binary @/tmp/app.tgz \
           -H 'Content-Type: application/x-gzip' \
-          http://vespa:19071/application/v2/tenant/default/prepareandactivate
+          http://brainstorm-vespa:19071/application/v2/tenant/default/prepareandactivate
         echo "[vespa-deploy] waiting for container cluster to serve the app..."
         for i in $$(seq 1 120); do
-          if curl -fSs -o /dev/null http://vespa:8080/ApplicationStatus; then
+          if curl -fSs -o /dev/null http://brainstorm-vespa:8080/ApplicationStatus; then
             echo "[vespa-deploy] vespa is serving — ready."
             exit 0
           fi
