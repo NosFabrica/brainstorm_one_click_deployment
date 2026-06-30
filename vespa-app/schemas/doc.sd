@@ -104,14 +104,67 @@ schema doc {
         }
     }
 
+    # ----------------------------------------------------------------------------
+    # name_and_quality_score_only
+    #
+    # Two match mechanisms reach a doc (the server ORs them together per word):
+    #   1. EXACT/stemmed token match on the index fields name/display_name/about
+    #      -> matchCount(<field>) > 0.  These are clean hits.
+    #   2. TRIGRAM match on the *_gram fields (name_gram/display_name_gram/about_gram)
+    #      -> matchCount(<field>) == 0 but matchCount(<field>_gram) > 0.  This is the
+    #      ONLY typo/prefix/substring path the deployed schema has: name/display_name/
+    #      about are `index` (not `attribute`) fields, so Vespa rejects fuzzy()/prefix
+    #      query operators on them — every "fuzzy"/"prefix"/"substring" hit therefore
+    #      arrives via shared trigrams. A 2-edit typo, a "nosfab" prefix, or a single
+    #      stray shared trigram (the garbage tail) all land here.
+    #
+    # Gram matching is phrase-of-trigrams == substring matching, so it tolerates
+    # prefixes/substrings/truncations ("nosfab", "fabrica" -> "nosfabrica") but a
+    # letter-substitution typo introduces foreign trigrams and matches NOTHING (verified:
+    # "nosfabrjca" returns 0 hits). The tail this profile must tame is therefore the
+    # substring / short-query gram noise (e.g. "nos" matching every *nos* name and *nos*
+    # bio), which the old flat `w_gram * bm25(*_gram)` let stand alone and `+ quality_boost`
+    # then floated to the top by observer trust.
+    #
+    # SCORING TIERS (see text_score(), the quantity the cutoff acts on):
+    #   >= 2000   exact/stemmed token match on name or display_name   (clean)
+    #    0..300   gram-only (substring/prefix) match; queryCompleteness^2 keeps full
+    #             substrings high (~300) and pushes stray-trigram noise toward 0
+    #   small     about fallback, only when neither name nor display_name matched
+    # The 2000 vs 300 gap (1700) exceeds the full quality_boost swing (~950), so a
+    # clean hit ALWAYS outranks any gram-only (substring) hit regardless of observer
+    # trust — that is what makes a near-miss score strictly below a clean match.
+    #
+    # PHASES:
+    #   first-phase  = text_score() only. Quality is deliberately excluded so a trusted
+    #                  observer cannot float a garbage text match into the candidate set.
+    #   second-phase = text_score() + quality_gate()*quality_boost(), re-ordering the
+    #                  text-qualified survivors by the observer's trust. quality_gate is
+    #                  1.0 for clean (exact, text>=2000) hits so the boost is fully intact
+    #                  there; it shrinks for the gram tail so a high-trust substring/bio
+    #                  mention cannot leapfrog a clean name match. Gram-only hits below
+    #                  query(text_floor) are sent to -1 and physically dropped by
+    #                  rank-score-drop-limit, trimming the long tail.
+    #
+    # match-features expose user_score (unchanged contract) and text_score so the server
+    # can mirror the cutoff: text_score >= 2000 == clean, < query(text_floor) == tail.
+    # ----------------------------------------------------------------------------
     rank-profile name_and_quality_score_only {
 
         inputs {
             query(user_q) tensor<float>(user{})
-            query(w_gram) double: 5.0
+            # Gram weight is now clamped to [0,1] (see gram_scale): the old 5.0/20.0
+            # magnitudes are ignored. Lower toward 0 to further suppress typo/substring
+            # hits. The server's "20.0 when shortest word <=3 chars" special-case is no
+            # longer needed — queryCompleteness is already query-length normalized.
+            query(w_gram) double: 1.0
             query(w_display_name) double: 0.2
-            query(w_about) double: 0.1
+            query(w_about) double: 0.5
             query(w_about_bonus) double: 0.0
+            # Text-relevance floor. Hits with text_score() below this are dropped in
+            # second-phase. Scale: gram-only hits span 0..300, so 60 keeps strong
+            # prefix/substring/typo hits and cuts the stray-trigram garbage tail.
+            query(text_floor) double: 60.0
         }
 
         function user_score() {
@@ -123,36 +176,61 @@ schema doc {
             expression: 1000 / (1 + exp(-0.073 * (user_score() - 50)))
         }
 
-        # Text relevance for the name field — the primary signal.
-        # Guard the bm25/fieldLength division against fieldLength=0 (empty field)
-        # which would produce 0/0 = NaN and propagate through max() in primary_text,
-        # silently dropping docs whose other text field is empty.
+        # Clamp the server-supplied gram weight into [0,1] so the gram tier can never
+        # cross the exact tier no matter what the server sends.
+        function gram_scale() {
+            expression: min(query(w_gram), 1.0)
+        }
+
+        # --- EXACT tier: a real (exact/stemmed) token match on the text field. ---
+        # +2000 floor guarantees any clean hit outranks the best gram-only hit (<=300).
+        # fieldMatch(<field>) in [0,1] adds completeness/proximity; the bm25/fieldLength
+        # term is the IDF-aware tie-breaker (guarded against fieldLength==0 -> 0/0 NaN).
+        function name_exact() {
+            expression {
+                if(matchCount(name) > 0,
+                    2000 + 200 * fieldMatch(name)
+                         + if(fieldLength(name) > 0, bm25(name) / pow(fieldLength(name), 1.5), 0),
+                    0)
+            }
+        }
+        function display_name_exact() {
+            expression {
+                if(matchCount(display_name) > 0,
+                    2000 + 200 * fieldMatch(display_name)
+                         + if(fieldLength(display_name) > 0, bm25(display_name) / pow(fieldLength(display_name), 1.5), 0),
+                    0)
+            }
+        }
+
+        # --- GRAM tier: substring / prefix match (no real token match on the field). ---
+        # Capped at 300 and scaled by queryCompleteness^2 (fraction of the query's
+        # trigrams found in the field, squared to sharpen the falloff):
+        #   full substring/prefix, all query trigrams present -> ~300
+        #   short query matching a larger field incidentally  -> lower
+        #   one stray shared trigram (garbage)                -> ~0  (cut by text_floor)
+        # Gated on matchCount(<field>)==0 so clean hits use the exact tier instead
+        # (no double counting), and on gram_scale() so the server can suppress further.
+        function name_gram_score() {
+            expression {
+                if(matchCount(name) == 0 && matchCount(name_gram) > 0,
+                    gram_scale() * 300 * pow(fieldMatch(name_gram).queryCompleteness, 2),
+                    0)
+            }
+        }
+        function display_name_gram_score() {
+            expression {
+                if(matchCount(display_name) == 0 && matchCount(display_name_gram) > 0,
+                    gram_scale() * 300 * pow(fieldMatch(display_name_gram).queryCompleteness, 2),
+                    0)
+            }
+        }
+
         function name_text() {
-            expression {
-                matchCount(name) * 100
-                + if(fieldLength(name) > 0, bm25(name) / pow(fieldLength(name), 1.5), 0)
-                + query(w_gram) * bm25(name_gram)
-            }
+            expression: name_exact() + name_gram_score()
         }
-
-        # Same strategy as name_text, applied to display_name.
         function display_name_text() {
-            expression {
-                matchCount(display_name) * 100
-                + if(fieldLength(display_name) > 0, bm25(display_name) / pow(fieldLength(display_name), 1.5), 0)
-                + query(w_gram) * bm25(display_name_gram)
-            }
-        }
-
-        # about: IDF-aware only (bm25), no flat matchCount term. This makes rare bio
-        # terms (e.g. "nosfabrica") score high while common ones (e.g. "robert",
-        # "bitcoin") score low — so a single-word bio search finds affiliated people
-        # without common words surfacing bio-mentioners over name-bearers.
-        function about_text() {
-            expression {
-                bm25(about)
-                + query(w_gram) * bm25(about_gram)
-            }
+            expression: display_name_exact() + display_name_gram_score()
         }
 
         # name and display_name have EQUAL impact: take whichever matched better.
@@ -169,17 +247,62 @@ schema doc {
             expression: if(matchCount(name) > 0 || matchCount(display_name) > 0, 0, 1)
         }
 
-        first-phase {
+        # Did ANY text field match a real (exact/stemmed) token? Such hits are never the
+        # "garbage tail" (which is gram-only substring/short-gram noise), so they are
+        # exempt from the text-floor cutoff — this keeps a legitimate rare-term bio match
+        # (e.g. "nosfabrica" appearing as a token in someone's about) from being dropped,
+        # while still cutting gram-only near-misses below the floor.
+        function has_exact_match() {
+            expression: if(matchCount(name) > 0 || matchCount(display_name) > 0 || matchCount(about) > 0, 1, 0)
+        }
+
+        # about: IDF-aware (rare bio terms like "nosfabrica" score high, common ones
+        # like "bitcoin" low). The gram path is gated + completeness-weighted so a stray
+        # bio trigram can't float a doc; bounded well under the exact tier.
+        function about_text() {
             expression {
-                primary_text()
-                + secondary_active() * query(w_about) * about_text()
-                + quality_boost()
+                bm25(about)
+                + if(matchCount(about) == 0 && matchCount(about_gram) > 0,
+                     gram_scale() * 100 * pow(fieldMatch(about_gram).queryCompleteness, 2),
+                     0)
             }
+        }
+
+        # Pure text relevance — the quantity the cutoff acts on (see tier scale above).
+        function text_score() {
+            expression: primary_text() + secondary_active() * query(w_about) * about_text()
+        }
+
+        # Attenuates the additive quality boost by text confidence so trust re-orders
+        # WITHIN a relevance tier but can never float a weak-text hit over a stronger one.
+        # == 1.0 for any clean (exact) hit (text_score >= 2000) → quality boost fully
+        # intact there; small for the gram tail (text <= 300) so a high-trust substring /
+        # bio mention can't leapfrog a clean name match.
+        function quality_gate() {
+            expression: min(text_score() / 2000.0, 1.0)
+        }
+
+        # First phase = TEXT ONLY: quality is excluded so trust cannot float garbage
+        # into the candidate set.
+        first-phase {
+            expression: text_score()
+        }
+
+        # Second phase re-orders text-qualified survivors by observer trust (quality_boost
+        # kept intact). A gram-only hit (no exact token match anywhere) whose text relevance
+        # is below the floor is sent to -1 and physically dropped by rank-score-drop-limit,
+        # trimming the long tail; real exact-token hits are always kept (has_exact_match).
+        second-phase {
+            expression {
+                if(has_exact_match() == 0 && text_score() < query(text_floor), -1, text_score() + quality_gate() * quality_boost())
+            }
+            rank-score-drop-limit: 0.0
         }
 
         match-features {
             user_score
             quality_boost
+            text_score
             name_text
             display_name_text
             about_text
