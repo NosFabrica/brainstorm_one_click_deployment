@@ -5,11 +5,19 @@ schema doc {
         field name type string {
             indexing: index | summary
             index: enable-bm25
+            # Proper-noun field: disable stemming so "Daniels" isn't conflated
+            # with "daniel" (Meilisearch doesn't stem names either; see §10 typo
+            # deep-dive in docs/search-vs-tapestry.md). DEPLOY NOTE: this is an
+            # index-time change -> needs a Vespa reindex (rebuilds from the doc
+            # store, no strfry re-feed) plus a validation-overrides.xml
+            # `indexing-change` allow (cf. §9.1).
+            stemming: none
         }
 
         field display_name type string {
             indexing: index | summary
             index: enable-bm25
+            stemming: none   # see `name` (proper-noun, no stemming)
         }
 
         field about type string {
@@ -30,8 +38,12 @@ schema doc {
             indexing: summary
         }
 
+        # P1: nip05 / lud16 / website are now searchable (were summary-only).
+        # Flipping summary -> index | summary needs a Vespa reindex (rebuilds
+        # from the doc store; no strfry re-feed). See docs/search-vs-tapestry.md §8.4.
         field nip05 type string {
-            indexing: summary
+            indexing: index | summary
+            index: enable-bm25
         }
 
         field lud06 type string {
@@ -39,14 +51,25 @@ schema doc {
         }
 
         field lud16 type string {
-            indexing: summary
+            indexing: index | summary
+            index: enable-bm25
         }
 
         field website type string {
-            indexing: summary
+            indexing: index | summary
+            index: enable-bm25
         }
 
+        # Per-observer GrapeRank score (rank = influence*100, 0..100), keyed by
+        # observer pubkey. Used for the rank>=N filter and the sort=rank order.
         field quality_scores type tensor<int8>(user{}) {
+            indexing: attribute
+        }
+
+        # Per-observer verified-follower count (scorecard.trusted_followers),
+        # keyed by observer pubkey. float (not int8) because counts exceed 127.
+        # Drives the default sort=followers order. See docs/search-vs-tapestry.md §8.2.
+        field follower_counts type tensor<float>(user{}) {
             indexing: attribute
         }
     }
@@ -104,7 +127,12 @@ schema doc {
         }
     }
 
-    rank-profile name_and_quality_score_only {
+    # PURE-TEXT default profile (P0 / docs/search-vs-tapestry.md §6). Used by
+    # /search/byText. Renamed from name_and_quality_score_only: trust is no
+    # longer blended into relevance() — text decides the order, mirroring how
+    # tapestry/Meilisearch ranks (text only) and applies trust separately. The
+    # NIP-50 relay uses the trust-sorted rank_* profiles below instead.
+    rank-profile text_relevance {
 
         inputs {
             query(user_q) tensor<float>(user{})
@@ -112,15 +140,79 @@ schema doc {
             query(w_display_name) double: 0.2
             query(w_about) double: 0.1
             query(w_about_bonus) double: 0.0
+            # Cap on how much the trigram (gram) signal can contribute to a
+            # field's text score. Kept below the matchCount unit (100) so a
+            # trigram-only match can never outrank a single exact token match.
+            # See docs/search-precision-and-filtering.md (Problem 1).
+            query(gram_cap) double: 80.0
+            # Per-observer rank floor for filter:rank:gte/gt. Defaults below
+            # every real score so the gate in the rank_* profiles below is a
+            # no-op unless a query sets it. See Problem 2 in the same doc.
+            query(min_rank) double: -1000000000.0
+            # Match-quality ladder step (§10 typo deep-dive). Spacing between the
+            # exact>prefix>1-typo>2-typo tiers within the token-match band. Kept
+            # >primary_text spread (so tiers don't cross on bm25) but its 4 steps
+            # (1000) stay below has_token_match's 1100, so the whole ladder lives
+            # inside the token tier. itemRawScore-driven; see match_quality().
+            query(w_match_step) double: 250.0
+            # Multi-word proximity bonus (fieldMatch). Tie-breaker WITHIN a
+            # match-quality tier; < w_match_step so it never reorders tiers.
+            query(w_proximity) double: 30.0
+            # Popularity/trust profiles (sort_followers, rank_desc, rank_asc) put
+            # the exact>typo match tier ABOVE the follower/trust sort — mirroring
+            # Meilisearch's `typo` rule sitting above `sort` — so a genuine name
+            # match never loses to a more-popular typo/substring hit, while
+            # verified followers still order WITHIN each tier (the §8.1
+            # popularity-first request). Far larger scale than the text-path
+            # steps above because verified_followers can be large.
+            #   w_pop_token_tier — any token match vs gram-only; always on, must
+            #     exceed any verified_followers / user_score.
+            #   w_pop_match_step — exact>prefix>1-typo>2-typo step, above
+            #     followers. Set 0 to disable exact-priority (pure
+            #     popularity-within-token).
+            query(w_pop_token_tier) double: 1000000000.0
+            query(w_pop_match_step) double: 10000000.0
+            # Affiliation tier (§11): a genuine bio OR website-domain token match
+            # (mtch_affil — e.g. bio "hosted by ODELL", or website odell.com)
+            # ranks ABOVE trigram/gram noise but BELOW real name matches, so
+            # related accounts surface above coincidental substring hits, ordered
+            # by verified followers within the tier.
+            #   w_affil_tier      — popularity/trust profiles; must be
+            #     > any verified_followers and < w_pop_token_tier. 0 disables.
+            #   w_affil_tier_text — pure-text profile; < the 1100 name band and
+            #     > gram/primary_text. 0 disables.
+            query(w_affil_tier) double: 10000000.0
+            # 400 -> 550 (§12): an about match by an "interesting" (rank >= 20)
+            # account now crosses a lame (rank ~2) name account in the
+            # multiplicative default — 550*wot_mult(20) > 2000*wot_mult(2) — while
+            # low-trust bios still stay below names. Live-tunable (query input).
+            query(w_affil_tier_text) double: 550.0
+            # --- Default (sort_followers) rewrite: IDF-diluted text × modest,
+            # multiplicative trust (team feedback 2026-07-01; docs §12). ---
+            # w_name_tier: additive name-match bonus INSIDE text_score() so genuine
+            #   name matches sit above IDF-scored identity/affiliation/gram. It's a
+            #   TEXT term, not trust.
+            query(w_name_tier) double: 2000.0
+            # w_identity: scale for the IDF-aware nip05/lud16 match (bm25). Common
+            #   domains (primal.net) -> ~0; a unique handle (vitorpamplona) -> high.
+            #   This is the "primal flood" fix.
+            query(w_identity) double: 50.0
+            # w_wot: MULTIPLICATIVE trust strength (NOT additive). wot_mult() = 0
+            #   below the query(min_rank) cutoff, then 1 + w_wot*log(1+rank-cutoff)
+            #   — a modest, concave (diminishing-returns) curve. 0 = pure text.
+            query(w_wot) double: 1.0
+            # Discard hits whose text_score is below this BEFORE the trust
+            # multiply (§12) — kills weak gram-only noise so trust can't float it.
+            # Default 50 (a real name/identity/affiliation match scores far
+            # higher; gram-only is < ~80). Live-tunable.
+            query(text_score_cutoff) double: 50.0
         }
 
+        # The observer's quality score for this doc. No longer part of text
+        # relevance — kept for the trust-sorted rank_* profiles and so the API
+        # can still surface it via match-features (_quality_score).
         function user_score() {
             expression: sum(query(user_q) * attribute(quality_scores))
-        }
-
-        # Logistic sigmoid centered at midpoint=50, slope=0.073 → σ(20)≈0.1, σ(80)≈0.9
-        function quality_boost() {
-            expression: 1000 / (1 + exp(-0.073 * (user_score() - 50)))
         }
 
         # Text relevance for the name field — the primary signal.
@@ -131,7 +223,7 @@ schema doc {
             expression {
                 matchCount(name) * 100
                 + if(fieldLength(name) > 0, bm25(name) / pow(fieldLength(name), 1.5), 0)
-                + query(w_gram) * bm25(name_gram)
+                + min(query(w_gram) * bm25(name_gram), query(gram_cap))
             }
         }
 
@@ -140,7 +232,7 @@ schema doc {
             expression {
                 matchCount(display_name) * 100
                 + if(fieldLength(display_name) > 0, bm25(display_name) / pow(fieldLength(display_name), 1.5), 0)
-                + query(w_gram) * bm25(display_name_gram)
+                + min(query(w_gram) * bm25(display_name_gram), query(gram_cap))
             }
         }
 
@@ -166,20 +258,225 @@ schema doc {
         # matched (e.g. "Primal Studio" for "primal") from also collecting the about
         # bonus — that double-dip let it edge past an exact name match.
         function secondary_active() {
-            expression: if(matchCount(name) > 0 || matchCount(display_name) > 0, 0, 1)
+            expression: if(has_token_match() > 0, 0, 1)
+        }
+
+        # A "real" token match — an exact, prefix, or fuzzy hit in the name or
+        # display_name *index*. Trigram-only recall matches the *_gram fields,
+        # which do NOT feed matchCount here, so this is 1 only for genuine name
+        # matches and 0 for a trigram-only accident (e.g. "greencandleit" pulled
+        # in by the shared "and"/"led" grams of a "handled" query).
+        function has_token_match() {
+            expression: if(matchCount(name) > 0 || matchCount(display_name) > 0 || matchCount(nip05) > 0 || matchCount(lud16) > 0, 1, 0)
+        }
+
+        # Graded match quality from the labeled query clauses set in
+        # app/core/vespa.py (_field_clauses): 4=exact, 3=prefix, 2=1-typo,
+        # 1=2-typo, 0=gram/recall-only. Mirrors Meilisearch's `typo` ranking
+        # bucket (exact > fewer-typos > more-typos). itemRawScore(label) sums the
+        # raw scores of query items carrying that label; >0 means such a match
+        # fired. DEGRADES to 0 (no extra tiering — has_token_match still gives the
+        # any-token-vs-gram tier) if the backend doesn't populate term raw scores,
+        # so this is safe to ship before staging confirms it. Validate via the
+        # itemRawScore match-features below. See §10 in docs/search-vs-tapestry.md.
+        function match_quality() {
+            expression: if(itemRawScore(mtch_exact) > 0, 4, if(itemRawScore(mtch_prefix) > 0, 3, if(itemRawScore(mtch_fz1) > 0, 2, if(itemRawScore(mtch_fz2) > 0, 1, 0))))
+        }
+
+        # A bio/website affiliation match: the query matched a token in `about`
+        # or `website` but NOT in a name field. Drives the affiliation tier (§11)
+        # — above gram-only noise, below real name matches, followers-ordered
+        # within. Uses matchCount (RELIABLE): itemRawScore does NOT populate for
+        # plain text terms in Vespa (confirmed on staging 2026-06-30 — all
+        # itemRawScore(mtch_*)=0 even on exact hits), so the label-based
+        # match_quality ladder is inert and the exact>prefix>typo name ordering
+        # is deferred (needs verbatim fields — §11.1). This coarse tier works.
+        # Gated on !has_token_match so name matches (already top tier) don't also
+        # collect it (which would reorder the name band by whether about matched).
+        function affiliation_match() {
+            expression: if(has_token_match() > 0, 0, if(matchCount(about) > 0 || matchCount(website) > 0, 1, 0))
+        }
+
+        # Multi-word proximity over the primary name fields (0..1) — Meilisearch's
+        # `proximity` rule, which we lacked. ~1 for single-word queries, so it's
+        # harmless there; for multi-word it rewards terms appearing close together.
+        function proximity() {
+            expression: max(fieldMatch(name).proximity, fieldMatch(display_name).proximity)
+        }
+
+        # --- Default-profile scoring (sort_followers): IDF-diluted text score,
+        # MULTIPLIED by a modest trust curve. See docs §12. ---
+
+        # Genuine NAME token match (name/display_name only). nip05/lud16 are
+        # deliberately EXCLUDED here — they score via identity_text() (IDF) so a
+        # common domain like primal.net can't flood the name tier. (Per NIP-24 the
+        # deprecated `username` folds into `name` at ingest, so no separate field.)
+        function name_match() {
+            expression: if(matchCount(name) > 0 || matchCount(display_name) > 0, 1, 0)
+        }
+
+        # IDF-aware match on the @-address identity fields (nip05, lud16). bm25 is
+        # tf*IDF, so a token shared by thousands of nip05s (primal, gmail, com)
+        # scores ~0 while a unique handle (vitorpamplona) scores high — exactly
+        # "the more a word is used, the smaller the score".
+        function identity_text() {
+            expression: bm25(nip05) + bm25(lud16)
+        }
+
+        # Flag: did a nip05/lud16 token match at all (for the "identity" tier
+        # label + match-features). The SCORE comes from identity_text().
+        function identity_match() {
+            expression: if(matchCount(nip05) > 0 || matchCount(lud16) > 0, 1, 0)
+        }
+
+        # IDF-aware TEXT relevance for the default profile — the thing we MULTIPLY
+        # by trust. All terms are TEXT (no trust here):
+        #   name_match*w_name_tier    — genuine name matches on top
+        #   primary_text()            — matchCount*100 + bm25/len + capped gram
+        #   w_identity*identity_text  — nip05/lud16, IDF-diluted (primal fix)
+        #   affiliation_match*...     — about/website affiliation
+        #   secondary*about           — about fallback when nothing else matched
+        # Common tokens and gram-only noise stay low, so trust can't float them.
+        function text_score() {
+            expression {
+                name_match() * query(w_name_tier)
+                + primary_text()
+                + query(w_identity) * identity_text()
+                + affiliation_match() * query(w_affil_tier_text)
+                + secondary_active() * query(w_about) * about_text()
+            }
+        }
+
+        # MULTIPLICATIVE trust — NOT an additive term (adding WoT is what swamped
+        # exactness in search-trust-vs-exact-match.md; the team asked to multiply).
+        # 0 below the rank cutoff (query(min_rank); server passes 2), then a modest,
+        # CONCAVE boost that increases with the observer's rank (user_score =
+        # influence*100). w_wot tunes strength; log gives diminishing returns.
+        function wot_mult() {
+            expression: if(user_score() < query(min_rank), 0.0, 1.0 + query(w_wot) * log(1.0 + max(0.0, user_score() - query(min_rank))))
+        }
+
+        # PURE-TEXT relevance — trust is intentionally NOT blended in (P0,
+        # docs/search-vs-tapestry.md §6). tapestry/Meilisearch never mixes WoT
+        # score into text relevance, and our additive quality_boost was swamping
+        # exactness (docs/search-trust-vs-exact-match.md). Here:
+        #   has_token_match()*1100  — match-quality tier: genuine token matches
+        #                             sit above trigram-only noise.
+        #   primary_text()          — bm25/exactness order WITHIN the tier.
+        # Trust ordering lives in the rank_* profiles below, not here. Reused by
+        # rank_filtered so a filter keeps this text order and just drops low-trust.
+        function relevance() {
+            expression {
+                has_token_match() * 1100
+                + match_quality() * query(w_match_step)
+                + affiliation_match() * query(w_affil_tier_text)
+                + query(w_proximity) * proximity()
+                + primary_text()
+                + secondary_active() * query(w_about) * about_text()
+            }
         }
 
         first-phase {
-            expression {
-                primary_text()
-                + secondary_active() * query(w_about) * about_text()
-                + quality_boost()
-            }
+            expression: relevance()
         }
 
         match-features {
             user_score
-            quality_boost
+            name_text
+            display_name_text
+            about_text
+            has_token_match
+            match_quality
+            affiliation_match
+            itemRawScore(mtch_exact)
+            itemRawScore(mtch_prefix)
+            itemRawScore(mtch_fz1)
+            itemRawScore(mtch_fz2)
+            itemRawScore(mtch_affil)
+        }
+    }
+
+    # -----------------------------------------------------------------------
+    # NIP-50 relay profiles — TRUST-SORTED-WITHIN-TEXT (P0, docs/search-vs-tapestry.md §6).
+    #
+    # All inherit text_relevance, so user_score(), has_token_match(),
+    # relevance(), the inputs, and match-features carry over. The NIP-50 relay
+    # uses rank_desc as its DEFAULT order (no sort token), matching tapestry's
+    # "text matches, sorted by trust within." Each gates on query(min_rank) for
+    # filter:rank:gte/gt, mapping a failing hit to SENTINEL (-1e9) and letting
+    # rank-score-drop-limit (-1e6) drop it. Real scores stay well above the
+    # SENTINEL, so the drop never bites a real hit.
+    #
+    # The server selects the profile from the sort/filter tokens and passes
+    #   ranking.features.query(min_rank)=<N>   (only when a filter is present).
+    # See app/core/vespa.py and app/routers/nip50/router.py.
+    # -----------------------------------------------------------------------
+
+    # filter:rank only (no sort): keep the pure-text relevance order, drop low-trust.
+    rank-profile rank_filtered inherits text_relevance {
+        first-phase {
+            expression: if(user_score() >= query(min_rank), relevance(), -1000000000.0)
+            rank-score-drop-limit: -1000000.0
+        }
+    }
+
+    # sort:rank:desc (+ optional filter): trust-sorted WITHIN each match tier.
+    # has_token_match()*w_pop_token_tier keeps genuine token matches above
+    # trigram-only noise; match_quality()*w_pop_match_step adds the
+    # exact>prefix>1-typo>2-typo bucketing ABOVE trust (Meili's `typo` over
+    # `sort`); within a tier, order by observer trust, high to low.
+    rank-profile rank_desc inherits text_relevance {
+        first-phase {
+            expression: if(user_score() >= query(min_rank), has_token_match() * query(w_pop_token_tier) + match_quality() * query(w_pop_match_step) + affiliation_match() * query(w_affil_tier) + user_score(), -1000000000.0)
+            rank-score-drop-limit: -1000000.0
+        }
+    }
+
+    # sort:rank:asc (+ optional filter): ascending trust WITHIN each match tier
+    # (low trust first). The tier terms stay POSITIVE (exact>typo buckets remain
+    # descending — exact on top); subtracting user_score() makes Vespa's
+    # descending sort yield ascending observer trust within a tier.
+    rank-profile rank_asc inherits text_relevance {
+        first-phase {
+            expression: if(user_score() >= query(min_rank), has_token_match() * query(w_pop_token_tier) + match_quality() * query(w_pop_match_step) + affiliation_match() * query(w_affil_tier) - user_score(), -1000000000.0)
+            rank-score-drop-limit: -1000000.0
+        }
+    }
+
+    # DEFAULT profile (docs §12, team feedback 2026-07-01): IDF-diluted text
+    # score MULTIPLIED by a modest trust curve. Supersedes the additive tier +
+    # follower sort (§8.1). Two behaviors the team asked for:
+    #   1. "primal" no longer floods — nip05/lud16 score via bm25 (IDF), so a
+    #      common domain contributes ~0 while a unique handle (vitorpamplona)
+    #      surfaces. See text_score()/identity_text().
+    #   2. Trust MULTIPLIES text (not added): wot_mult() = 0 below the rank cutoff
+    #      (query(min_rank), server passes 2), a modest concave boost above.
+    # Tune LIVE via query(w_wot)/query(w_identity)/query(min_rank)/query(w_name_tier)
+    # — all rank-config, no redeploy. verified_followers() kept for the
+    # _followers match-feature only (no longer the sort key).
+    rank-profile sort_followers inherits text_relevance {
+        function verified_followers() {
+            expression: sum(query(user_q) * attribute(follower_counts))
+        }
+        first-phase {
+            # Discard weak text (text_score < text_score_cutoff) before the trust
+            # multiply -> 0 so rank-score-drop-limit drops it. wot_mult()=0 (rank
+            # below its cutoff) also -> 0. Genuine hits score hundreds+.
+            expression: if(text_score() < query(text_score_cutoff), 0.0, text_score() * wot_mult())
+            rank-score-drop-limit: 0.5
+        }
+        # Surface the decisive signals so /search/byText and the inspector can
+        # show WHY a hit ranked where it did (text bands + the trust multiplier).
+        match-features {
+            user_score
+            verified_followers
+            name_match
+            identity_match
+            identity_text
+            has_token_match
+            affiliation_match
+            text_score
+            wot_mult
             name_text
             display_name_text
             about_text
