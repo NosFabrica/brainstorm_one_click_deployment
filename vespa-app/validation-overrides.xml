@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!--
+  Acknowledges two one-time schema changes in this deploy:
+
+  1. indexing-change: nip05 / lud16 / website go from `summary` to
+     `index | summary` so they become searchable (docs/search-vs-tapestry.md
+     §8.4/§9). Reindexed for existing docs via the kind-0 re-feed
+     (scripts/refeed_kind0_to_vespa.py).
+
+  2. field-removal: the `username` field is removed. Per NIP-24 it is a
+     deprecated alias of `name`, so ingest now folds it into `name` and we no
+     longer store it as its own field. Only needed on environments where the
+     P1 `username` field was already deployed; harmless elsewhere.
+
+  `until` MUST be within 30 days of the deploy date. Remove this file (or let it
+  expire) once the changes have been activated everywhere — it should NOT
+  linger, or it would silently allow future accidental schema changes.
+-->
+<validation-overrides>
+    <allow until="2026-07-14">indexing-change</allow>
+    <allow until="2026-07-14">field-removal</allow>
+</validation-overrides>
