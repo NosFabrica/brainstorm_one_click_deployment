@@ -1,15 +1,44 @@
 services:
   brainstorm-server:
+    build:
+      context: ../brainstorm_server
     environment:
+      deploy_environment: LOCAL
       frontend_url: http://localhost:3000
+      public_base_url: http://localhost:8000
       nostr_upload_ta_events_relay_public_url: ws://localhost:7778
       perform_nostr_full_sync: false
+      vespa_full_sync: false
+      relay_full_sync: false
+    depends_on: !reset
+      postgres: { condition: service_healthy }
+      redis_strfry: { condition: service_healthy }
+      neo4j: { condition: service_started }
+      neofry: { condition: service_started }
+      strfry: { condition: service_started }
+      vespa-deploy: { condition: service_completed_successfully }
+
+  brainstorm-graperank:
+    build:
+      context: ../brainstorm_graperank_algorithm
+    depends_on:
+      redis_strfry: { condition: service_healthy }
+      neo4j: { condition: service_started }
+
+  redis_strfry:
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
 
   brainstorm-ui:
     build:
       context: ../Brainstorm-UI
-      args:
-        VITE_API_URL: http://localhost:8000
+    environment:
+      VITE_API_URL: http://localhost:8000
+      VITE_NIP85_RELAY_URL: http://localhost:7778
 
   # Uncomment to reduce Neo4j memory usage for machines with limited RAM
   # neo4j:
