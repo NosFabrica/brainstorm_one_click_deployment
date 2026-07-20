@@ -39,6 +39,7 @@ services:
     environment:
       VITE_API_URL: http://localhost:8000
       VITE_NIP85_RELAY_URL: http://localhost:7778
+      VITE_WOT_SEARCH_RELAY: ws://localhost:8000/relay
 
   # Uncomment to reduce Neo4j memory usage for machines with limited RAM
   # neo4j:
