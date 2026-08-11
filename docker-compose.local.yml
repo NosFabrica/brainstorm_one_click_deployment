@@ -42,13 +42,13 @@ services:
       VITE_WOT_SEARCH_RELAY: ws://localhost:8000/relay
 
   # Uncomment to reduce Neo4j memory usage for machines with limited RAM
-  # neo4j:
+  # brainstorm-neo4j:
   #   environment:
   #     NEO4J_server_memory_heap_initial__size: 2G
   #     NEO4J_server_memory_heap_max__size: 2G
   #     NEO4J_server_memory_pagecache_size: 4G
 
-  neofry:
+  brainstorm-neofry:
     image: neofry
     build:
       context: ../strfry
