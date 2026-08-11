@@ -117,6 +117,30 @@ services:
         soft: 1048576
         hard: 1048576
 
+  # NIP-50 search proxy: a stateless WebSocket shim that adds NIP-50 profile
+  # search on top of neofry. Intercepts REQs with a `search` field, runs a
+  # GrapeRank-ranked search via brainstorm-server, and returns the signed kind-0
+  # events from neofry. All other relay traffic is forwarded untouched.
+  nip50-proxy:
+    image: nip50-proxy-service
+    build:
+      context: ./nip50-proxy
+    container_name: nip50-proxy
+    ports:
+      - "7781:7781"
+    environment:
+      NIP50_HOST: 0.0.0.0
+      NIP50_PORT: 7781
+      BACKING_RELAY_WS: ws://neofry:7777
+      BACKING_RELAY_HTTP: http://neofry:7777
+      SEARCH_API_URL: http://brainstorm-server:8000
+    depends_on:
+      neofry:
+        condition: service_started
+      brainstorm-server:
+        condition: service_started
+    restart: unless-stopped
+
   # NOTE: restart neofry if router stops updating, see README.md
   neofry:
     image: ghcr.io/nosfabrica/neofry:latest
