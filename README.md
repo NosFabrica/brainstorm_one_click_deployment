@@ -15,8 +15,10 @@ docker build -t brainstorm-graperank-service .
 clone the BrainstormUI repo, and on the main directory, run:
 
 ```bash
-docker build -t brainstorm-ui-service --build-arg VITE_API_URL=https://brainstormserver.nosfabrica.com VITE_NIP85_RELAY_URL=wss://nip85.nosfabrica.com .
+docker build -t brainstorm-ui-service .
 ```
+
+no build args: the UI's Dockerfile declares none, so `--build-arg VITE_API_URL=…` does nothing. the UI reads its URLs (`VITE_API_URL`, `VITE_NIP85_RELAY_URL`, …) at runtime from `/config.js`, which its entrypoint fills from the container's environment at start — so set them under `environment:` on the `brainstorm-ui` service (as `docker-compose.local.yml` does), and changing them needs a `docker compose up -d` (which recreates the container), not a rebuild.
 
 now, on this repo's main directory, run:
 
@@ -38,7 +40,7 @@ for local dev, use the local override which builds UI and neofry from source and
 docker compose -f docker-compose.yml -f docker-compose.local.yml up --build
 ```
 
-this requires the brainstorm_server, brainstorm_graperank, and Brainstorm-UI repos cloned as siblings.
+this requires the brainstorm_server, brainstorm_graperank_algorithm, Brainstorm-UI and strfry (NosFabrica's neofry fork, whose default branch is `neofry`) repos cloned as siblings, under those directory names — the override's build contexts are `../<repo>`.
 
 ---
 
